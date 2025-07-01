@@ -1,6 +1,12 @@
 name: Deploy
 
 on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       environment:
@@ -11,30 +17,23 @@ on:
           - dev
           - stg
           - prd
-      branch:
-        description: 'Branch to deploy from'
-        required: true
-        type: string
-        default: 'main'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     if: |
-      (github.event.inputs.environment == 'prd' && github.event.inputs.branch == 'main') ||
-      (github.event.inputs.environment == 'stg' && (github.event.inputs.branch == 'main' || github.event.inputs.branch == 'stg')) ||
+      (github.event.inputs.environment == 'prd' && github.ref_name == 'main') ||
+      (github.event.inputs.environment == 'stg' && (github.ref_name == 'main' || github.ref_name == 'stg')) ||
       (github.event.inputs.environment == 'dev')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.branch }}
       
       - name: Display deployment information
         run: |
           echo "=== Deployment Information ==="
           echo "Environment: ${{ github.event.inputs.environment }}"
-          echo "Branch: ${{ github.event.inputs.branch }}"
+          echo "Branch: ${{ github.ref_name }}"
           echo "Commit SHA: ${{ github.sha }}"
           echo "Workflow run: ${{ github.run_number }}"
           echo "=========================="
