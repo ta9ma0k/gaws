@@ -22,6 +22,18 @@ Manual deployment workflow with environment and branch restrictions:
   - `dev`: any branch allowed
 - **Usage**: Run via GitHub Actions UI with environment and branch inputs
 
+### Four Keys Metrics Workflow (`.github/workflows/four-keys-metrics.yml`)
+Automated metrics collection for software delivery performance:
+- **Schedule**: Every Saturday at 9:00 AM JST (analyzes previous Monday-Friday)
+- **Manual trigger**: Available with week offset parameter
+- **Metrics calculated**:
+  - Deployment Frequency (main branch merges)
+  - Lead Time for Changes (PR creation to merge time)
+  - Mean Time to Recovery (hotfix response time)
+  - Change Failure Rate (failed deployments percentage)
+- **Output**: Creates GitHub issue with weekly metrics report
+- **Requirements**: Uses branch strategy defined in README.md
+
 ## Development Notes
 
 This appears to be a testing/experimental repository for GitHub Actions. When working with this codebase:

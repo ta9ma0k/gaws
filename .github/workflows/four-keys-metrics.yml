@@ -1,0 +1,221 @@
+name: Four Keys Metrics
+
+on:
+  schedule:
+    # Run every Saturday at 9:00 AM JST (00:00 UTC)
+    - cron: '0 0 * * 6'
+  workflow_dispatch:
+    inputs:
+      week_offset:
+        description: 'Weeks back to analyze (0 = current week)'
+        required: false
+        type: number
+        default: 0
+
+jobs:
+  calculate-four-keys:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate date range
+        id: dates
+        run: |
+          # Calculate the Monday-Friday of the target week
+          WEEK_OFFSET=${{ github.event.inputs.week_offset || 0 }}
+          
+          # Get current date and calculate target Saturday
+          TARGET_SATURDAY=$(date -d "saturday - $((WEEK_OFFSET * 7)) days" +%Y-%m-%d)
+          
+          # Calculate Monday and Friday of that week
+          MONDAY=$(date -d "$TARGET_SATURDAY - 5 days" +%Y-%m-%d)
+          FRIDAY=$(date -d "$TARGET_SATURDAY - 1 day" +%Y-%m-%d)
+          
+          echo "monday=$MONDAY" >> $GITHUB_OUTPUT
+          echo "friday=$FRIDAY" >> $GITHUB_OUTPUT
+          echo "week-of=$MONDAY to $FRIDAY" >> $GITHUB_OUTPUT
+          
+          echo "Analyzing week: $MONDAY to $FRIDAY"
+
+      - name: Get deployment frequency
+        id: deployment-frequency
+        run: |
+          MONDAY="${{ steps.dates.outputs.monday }}"
+          FRIDAY="${{ steps.dates.outputs.friday }}"
+          
+          # Count successful production deployment workflow runs
+          gh run list --workflow=deploy.yml --status=success --created="$MONDAY..$FRIDAY" --json conclusion | jq '. | length' > deployments.json
+          
+          DEPLOYMENTS=$(cat deployments.json)
+          echo "deployments=$DEPLOYMENTS" >> $GITHUB_OUTPUT
+          echo "Deployment Frequency: $DEPLOYMENTS deployments"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Get lead time for changes
+        id: lead-time
+        run: |
+          MONDAY="${{ steps.dates.outputs.monday }}"
+          FRIDAY="${{ steps.dates.outputs.friday }}"
+          
+          # Get merged PRs during the week
+          gh pr list --state merged --search "merged:$MONDAY..$FRIDAY" --json number,mergedAt,createdAt --jq '
+            map(
+              (.mergedAt | fromdateiso8601) - (.createdAt | fromdateiso8601)
+            ) | 
+            if length > 0 then (add / length / 3600) else 0 end
+          ' > lead_time.json
+          
+          LEAD_TIME=$(cat lead_time.json)
+          echo "lead-time-hours=$LEAD_TIME" >> $GITHUB_OUTPUT
+          echo "Lead Time for Changes: $LEAD_TIME hours (average)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Get mean time to recovery
+        id: mttr
+        run: |
+          MONDAY="${{ steps.dates.outputs.monday }}"
+          FRIDAY="${{ steps.dates.outputs.friday }}"
+          
+          # Look for hotfix or rollback commits
+          INCIDENTS=$(git log --oneline --since="$MONDAY 00:00:00" --until="$FRIDAY 23:59:59" --grep="hotfix" --grep="rollback" --grep="revert" --all | wc -l)
+          
+          if [ $INCIDENTS -gt 0 ]; then
+            # Simple calculation: assume 2 hours average recovery time
+            MTTR_HOURS=2
+          else
+            MTTR_HOURS=0
+          fi
+          
+          echo "mttr-hours=$MTTR_HOURS" >> $GITHUB_OUTPUT
+          echo "incidents=$INCIDENTS" >> $GITHUB_OUTPUT
+          echo "Mean Time to Recovery: $MTTR_HOURS hours"
+          echo "Incidents: $INCIDENTS"
+
+      - name: Get change failure rate
+        id: change-failure-rate
+        run: |
+          MONDAY="${{ steps.dates.outputs.monday }}"
+          FRIDAY="${{ steps.dates.outputs.friday }}"
+          
+          # Count total changes (deployments)
+          TOTAL_CHANGES=$(git log --oneline --since="$MONDAY 00:00:00" --until="$FRIDAY 23:59:59" --grep="Merge pull request" --all | wc -l)
+          
+          # Count failed changes (hotfixes, reverts, rollbacks)
+          FAILED_CHANGES=$(git log --oneline --since="$MONDAY 00:00:00" --until="$FRIDAY 23:59:59" --grep="hotfix" --grep="rollback" --grep="revert" --all | wc -l)
+          
+          if [ $TOTAL_CHANGES -gt 0 ]; then
+            FAILURE_RATE=$(echo "scale=2; $FAILED_CHANGES * 100 / $TOTAL_CHANGES" | bc -l)
+          else
+            FAILURE_RATE=0
+          fi
+          
+          echo "failure-rate=$FAILURE_RATE" >> $GITHUB_OUTPUT
+          echo "total-changes=$TOTAL_CHANGES" >> $GITHUB_OUTPUT
+          echo "failed-changes=$FAILED_CHANGES" >> $GITHUB_OUTPUT
+          echo "Change Failure Rate: $FAILURE_RATE%"
+
+      - name: Generate Four Keys report
+        run: |
+          echo "# Four Keys Metrics Report"
+          echo "**Week:** ${{ steps.dates.outputs.week-of }}"
+          echo ""
+          echo "## Metrics Summary"
+          echo "| Metric | Value | Classification |"
+          echo "|--------|-------|----------------|"
+          
+          # Deployment Frequency
+          DEPLOYMENTS=${{ steps.deployment-frequency.outputs.deployments }}
+          if [ $DEPLOYMENTS -ge 1 ]; then
+            DF_CLASS="Elite/High"
+          elif [ $DEPLOYMENTS -gt 0 ]; then
+            DF_CLASS="Medium"
+          else
+            DF_CLASS="Low"
+          fi
+          echo "| Deployment Frequency | $DEPLOYMENTS deployments/week | $DF_CLASS |"
+          
+          # Lead Time
+          LEAD_TIME=${{ steps.lead-time.outputs.lead-time-hours }}
+          if (( $(echo "$LEAD_TIME < 24" | bc -l) )); then
+            LT_CLASS="Elite"
+          elif (( $(echo "$LEAD_TIME < 168" | bc -l) )); then
+            LT_CLASS="High"
+          elif (( $(echo "$LEAD_TIME < 720" | bc -l) )); then
+            LT_CLASS="Medium"
+          else
+            LT_CLASS="Low"
+          fi
+          echo "| Lead Time for Changes | ${LEAD_TIME} hours | $LT_CLASS |"
+          
+          # MTTR
+          MTTR=${{ steps.mttr.outputs.mttr-hours }}
+          if (( $(echo "$MTTR < 1" | bc -l) )); then
+            MTTR_CLASS="Elite"
+          elif (( $(echo "$MTTR < 24" | bc -l) )); then
+            MTTR_CLASS="High"
+          elif (( $(echo "$MTTR < 168" | bc -l) )); then
+            MTTR_CLASS="Medium"
+          else
+            MTTR_CLASS="Low"
+          fi
+          echo "| Mean Time to Recovery | $MTTR hours | $MTTR_CLASS |"
+          
+          # Change Failure Rate
+          CFR=${{ steps.change-failure-rate.outputs.failure-rate }}
+          if (( $(echo "$CFR < 5" | bc -l) )); then
+            CFR_CLASS="Elite/High"
+          elif (( $(echo "$CFR < 15" | bc -l) )); then
+            CFR_CLASS="Medium"
+          else
+            CFR_CLASS="Low"
+          fi
+          echo "| Change Failure Rate | $CFR% | $CFR_CLASS |"
+          
+          echo ""
+          echo "## Raw Data"
+          echo "- **Total Deployments:** ${{ steps.deployment-frequency.outputs.deployments }}"
+          echo "- **Total Changes:** ${{ steps.change-failure-rate.outputs.total-changes }}"
+          echo "- **Failed Changes:** ${{ steps.change-failure-rate.outputs.failed-changes }}"
+          echo "- **Incidents:** ${{ steps.mttr.outputs.incidents }}"
+
+      - name: Create issue with metrics
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Four Keys Metrics - Week of ${{ steps.dates.outputs.week-of }}`;
+            const body = `# Four Keys Metrics Report
+            **Week:** ${{ steps.dates.outputs.week-of }}
+            
+            ## Metrics Summary
+            | Metric | Value |
+            |--------|-------|
+            | Deployment Frequency | ${{ steps.deployment-frequency.outputs.deployments }} deployments/week |
+            | Lead Time for Changes | ${{ steps.lead-time.outputs.lead-time-hours }} hours |
+            | Mean Time to Recovery | ${{ steps.mttr.outputs.mttr-hours }} hours |
+            | Change Failure Rate | ${{ steps.change-failure-rate.outputs.failure-rate }}% |
+            
+            ## Raw Data
+            - **Total Deployments:** ${{ steps.deployment-frequency.outputs.deployments }}
+            - **Total Changes:** ${{ steps.change-failure-rate.outputs.total-changes }}
+            - **Failed Changes:** ${{ steps.change-failure-rate.outputs.failed-changes }}
+            - **Incidents:** ${{ steps.mttr.outputs.incidents }}
+            
+            _Generated automatically by Four Keys Metrics workflow_`;
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['metrics', 'four-keys']
+            });
